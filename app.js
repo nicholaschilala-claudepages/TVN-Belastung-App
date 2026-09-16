@@ -75,7 +75,7 @@ window.addEventListener('offline', ()=> setSyncStatus(CLOUD_SYNC_ACTIVE ? 'offli
 
 /* ================================ Lokaler Speicher (IndexedDB) ================================ */
 const DB_NAME = 'tvnLoadDB_v1';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let localDb = null;
 function localOpenDB(){
   return new Promise((resolve,reject)=>{
@@ -92,6 +92,7 @@ function localOpenDB(){
         const ct = db.createObjectStore('coachComments',{keyPath:'id'});
         ct.createIndex('playerId','playerId',{unique:false});
       }
+      if(!db.objectStoreNames.contains('coachAuth')) db.createObjectStore('coachAuth',{keyPath:'id'});
     };
     req.onsuccess = ()=>{ localDb = req.result; resolve(); };
     req.onerror = ()=> reject(req.error);
@@ -242,7 +243,7 @@ function renderTipsCard(entries, res){
 
 /* ================================ State / Cache ================================ */
 const state = { screen:'home', role: sessionRole(), currentPlayerId: rememberedPlayerId(), pinInput:'', logType:null, coachDetailId:null, entryDraftDate: todayISO(), commentScope:'general', commentEntryId:null, commentText:'' };
-const cache = { players:[], entries:[], pins:{}, comments:[] };
+const cache = { players:[], entries:[], pins:{}, comments:[], coachPin:null };
 function sessionRole(){ try{ return localStorage.getItem('tvnload_role') || null; }catch(e){ return null; } }
 function rememberedPlayerId(){ try{ return localStorage.getItem('tvnload_playerId') || null; }catch(e){ return null; } }
 function rememberSession(role, playerId){
@@ -250,6 +251,15 @@ function rememberSession(role, playerId){
     if(role) localStorage.setItem('tvnload_role', role); else localStorage.removeItem('tvnload_role');
     if(playerId) localStorage.setItem('tvnload_playerId', playerId); else localStorage.removeItem('tvnload_playerId');
   }catch(e){ /* localStorage evtl. nicht verfügbar – kein Problem, nur weniger Komfort */ }
+}
+/* Trainer-Zugang: eigene, von der Spieler-PIN unabhängige Geräte-Freischaltung.
+   Schützt davor, dass jeder mit dem App-Link versehentlich im Trainer-Dashboard
+   landet – ist aber (wie die gesamte App-Absicherung, siehe Firestore-Regeln)
+   ein UX-Schutz auf App-Ebene, keine serverseitige Zugriffskontrolle. */
+function coachAuthed(){ try{ return localStorage.getItem('tvnload_coachAuthed') === '1'; }catch(e){ return false; } }
+function setCoachAuthed(v){
+  try{ if(v) localStorage.setItem('tvnload_coachAuthed','1'); else localStorage.removeItem('tvnload_coachAuthed'); }
+  catch(e){ /* kein Problem, nur weniger Komfort */ }
 }
 function go(screen, extra){ state.screen = screen; Object.assign(state, extra||{}); render(); window.scrollTo(0,0); }
 function currentPlayer(){ return cache.players.find(p=>p.id===state.currentPlayerId); }
@@ -262,6 +272,8 @@ async function reloadAll(){
   cache.comments = await idbGetAll('coachComments');
   const pins = await idbGetAll('loadPins');
   cache.pins = {}; pins.forEach(p=> cache.pins[p.id]=p.pin);
+  const coachAuth = await idbGet('coachAuth', 'coach');
+  cache.coachPin = coachAuth ? coachAuth.pin : null;
 }
 function playerComments(playerId){ return cache.comments.filter(c=>c.playerId===playerId).sort((a,b)=> b.createdAt-a.createdAt); }
 function unreadCommentsCount(playerId){ return cache.comments.filter(c=>c.playerId===playerId && !c.read).length; }
@@ -298,6 +310,7 @@ function render(){
     case 'playerLog': html = screenPlayerLog(); break;
     case 'playerHistory': html = screenPlayerHistory(); break;
     case 'playerFeedback': html = screenPlayerFeedback(); break;
+    case 'coachLogin': html = screenCoachLogin(); break;
     case 'coachDashboard': html = screenCoachDashboard(); break;
     case 'coachDetail': html = screenCoachDetail(); break;
     default: html = screenHome();
@@ -325,11 +338,49 @@ function screenHome(){
     <div class="card">
       <p class="sub" style="margin-bottom:10px;">Wähle deinen Bereich:</p>
       <button class="btn btn-primary btn-block-lg" onclick="go('playerLogin')">Spieler-Ansicht</button>
-      <button class="btn btn-outline btn-block-lg" onclick="go('coachDashboard')">Trainer-Dashboard</button>
+      <button class="btn btn-outline btn-block-lg" onclick="goCoach()">Trainer-Dashboard</button>
     </div>
     <div id="sync-badge" class="footer-note"></div>
   `;
 }
+function goCoach(){
+  state.pinInput = '';
+  if(coachAuthed()){ go('coachDashboard'); }
+  else { go('coachLogin'); }
+}
+function screenCoachLogin(){
+  const hasPin = !!cache.coachPin;
+  return `
+    ${topbar('Trainer-Anmeldung', hasPin ? 'Bitte Trainer-PIN eingeben' : 'Noch keine Trainer-PIN vergeben', 'home')}
+    <div class="card">
+      <div class="field">
+        <label>Trainer-PIN</label>
+        <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" id="coach-pin-field" placeholder="z.B. 4321" value="${escapeHtml(state.pinInput)}" oninput="state.pinInput=this.value">
+      </div>
+      <button class="btn btn-gold" onclick="attemptCoachLogin()">Anmelden</button>
+      ${hasPin
+        ? `<p class="sub">Die Trainer-PIN kennen nur die Trainer – bitte nicht an Spieler weitergeben.</p>`
+        : `<p class="sub">Diese PIN gilt für alle Trainer gemeinsam und wird jetzt einmalig festgelegt. Bitte danach nur an die Trainer weitergeben.</p>`}
+    </div>
+  `;
+}
+function attemptCoachLogin(){
+  safe(async ()=>{
+    const pin = (state.pinInput||'').trim();
+    if(!pin){ toast('Bitte PIN eingeben.'); return; }
+    if(!cache.coachPin){
+      await idbPut('coachAuth', {id:'coach', pin});
+      cache.coachPin = pin;
+      toast('Trainer-PIN festgelegt.');
+    } else if(cache.coachPin !== pin){
+      toast('PIN stimmt nicht – bitte erneut versuchen.');
+      return;
+    }
+    setCoachAuthed(true);
+    go('coachDashboard');
+  }, 'Anmeldung fehlgeschlagen.');
+}
+function coachLogout(){ setCoachAuthed(false); go('home'); }
 
 function screenPlayerLogin(){
   const players = activePlayers();
@@ -553,6 +604,7 @@ function screenCoachDashboard(){
     <div class="card">
       <button class="btn btn-gold" onclick="exportTeamXlsx()">Team als Excel exportieren</button>
       <p class="sub">Sortiert nach Risiko – rot zuerst. Kader wird aus der Spielstatistik-App übernommen.</p>
+      <button class="btn btn-outline" style="margin-top:10px;" onclick="coachLogout()">🔒 Trainer abmelden (dieses Gerät)</button>
     </div>
     <div class="card">
       ${rows.length===0? `<p class="empty-hint">Kein Kader geladen.</p>` : rows.map(r=>`

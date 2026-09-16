@@ -1,6 +1,6 @@
 /* TVN Belastungssteuerung – Service Worker (gleiches Muster wie in der Spielstatistik-App) */
 
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = 'tvn-load-' + CACHE_VERSION;
 
 const APP_SHELL = [
